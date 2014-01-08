@@ -20,6 +20,9 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <string.h>
+#include <stdio.h>
+#include <time.h>
+#include <pthread.h>
 #include <jni.h>
 
 #include "SerialPort.h"
@@ -66,6 +69,82 @@ static speed_t getBaudrate(jint baudrate)
 	case 4000000: return B4000000;
 	default: return -1;
 	}
+}
+
+/* Hooks the requests to the device in path that has a fd descriptor */
+struct snifferarg
+{
+	int realfd;
+	int socket;
+	time_t opentime;
+	const char* devname;
+};
+
+/* TODO: error checks */
+static void portsniffer(void *arg)
+{
+	/* Obtaining a local copy of task spec and freeing the params */
+	struct snifferarg task;
+	memcpy(&task, arg, sizeof(struct snifferarg));
+	free(arg);
+	
+	/* Open the file descriptor, fill the header */
+	char fname[256];
+	sprintf(fname, "/tmp/%d.json", (long)task.opentime);
+	FILE *fp=fopen(fname,"w");
+	if (!fp)
+		return; /* TODO: report error */
+	fprintf(fp,"{ \"sniffer\" : { \"devname\" : \"%s\", \"opentime\" : %d, \"measurements\" : [\n", task.devname, (long)task.opentime);
+	
+	/* Waiting for the events */
+	int fds[2] = { task.realfd, task.socket }; /* TODO: check if closing the socket triggers anything, if not, use poll() */
+	const char *dirs[2] = { "in", "out" };
+	int i;
+	for (;;)
+	{
+		fd_set rfds,efds;
+		FD_ZERO(&rfds); FD_ZERO(&efds);
+		for (i=0;i<2;i++)
+		{
+			FD_SET(fds[i],&rfds);
+			FD_SET(fds[i],&efds);
+		}
+		int r;
+		if ( ( r = select(max(fds[0],fds[1]) + 1, &rfds, NULL, &efds, NULL) ) != -1 )
+			return; /* TODO: report error */
+			
+		/* First, check for errors */
+		if (FD_ISSET(fds[0],efds) || FD_ISSET(fds[1],efds))
+		{
+			close(task.socket); close(task.realfd);
+			break;
+		}
+		
+		/* Great, let's see how much data we have to read */
+		for (i=0;i<2;i++)
+		{
+			if (FD_ISSET(fds[i]),rfds)
+			{
+				int navail = -1;
+				if (ioctl(fds[i], FIONREAD, &navail) < 0)
+					return /* TODO: report error */
+				
+				/* Now we know the amount, read the data and pass it on */
+				char *buf=malloc(navail);
+				read(fds[i], buf, navail);
+				write(fds[!i], buf, navail);
+				
+				/* Log the whole thing TODO: should we log the data "as is" or in hexes? */
+				fprintf(fp,"{ \"direction\" : \"%s\", \"time\" : %d, \"data\" : \"%s\" }\n", dirs[i], mktime(localtime(NULL)), buf);
+				
+				free(buf);
+			}
+		}
+	}
+	
+	/* Okay, the other of the socket is closed, let's finish */
+	fprintf(fp,"] } }\n");
+	fclose(fp);
 }
 
 /*
