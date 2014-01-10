@@ -86,6 +86,9 @@ static void portsniffer(void *arg)
 	/* Obtaining a local copy of task spec and freeing the params */
 	struct snifferarg task;
 	memcpy(&task, arg, sizeof(struct snifferarg));
+	char *devname=((struct snifferarg *)arg)->devname;
+	task.devname=malloc(strlen(devname));
+	strcpy(task.devname, devname); /* TODO: this may leak on premature return, use goto */
 	free(arg);
 	
 	/* Open the file descriptor, fill the header */
@@ -154,6 +157,7 @@ static void portsniffer(void *arg)
 	/* Okay, the other of the socket is closed, let's finish */
 	fprintf(fp,"] } }\n");
 	fclose(fp);
+	free(task.devname);
 }
 
 /*
@@ -165,8 +169,10 @@ JNIEXPORT jobject JNICALL Java_android_1serialport_1api_SerialPort_open
   (JNIEnv *env, jclass thiz, jstring path, jint baudrate, jint flags)
 {
 	int fd;
+	int sockets[2];
 	speed_t speed;
 	jobject mFileDescriptor;
+	const char *path_utf;
 
 	/* Check arguments */
 	{
@@ -181,11 +187,11 @@ JNIEXPORT jobject JNICALL Java_android_1serialport_1api_SerialPort_open
 	/* Opening device */
 	{
 		jboolean iscopy;
-		const char *path_utf = (*env)->GetStringUTFChars(env, path, &iscopy);
+		path_utf = (*env)->GetStringUTFChars(env, path, &iscopy);
 		LOGD("Opening serial port %s with flags 0x%x", path_utf, O_RDWR | flags);
 		fd = open(path_utf, O_RDWR | flags);
 		LOGD("open() fd = %d", fd);
-		(*env)->ReleaseStringUTFChars(env, path, path_utf);
+
 		if (fd == -1)
 		{
 			/* Throw an exception */
@@ -220,13 +226,33 @@ JNIEXPORT jobject JNICALL Java_android_1serialport_1api_SerialPort_open
 		}
 	}
 
+	/* Create a socket pair and launch the thread */
+	{
+		if (socketpair(AF_LOCAL, SOCK_STREAM, 0, sockets) < 0)
+		{
+			LOGE("socketpair() failed");
+			return;
+		}
+		
+		struct snifferarg *args = (struct snifferargs *)malloc(sizeof(struct snifferargs));
+		args->realfd=fd;
+		args->socket=sockets[0];
+		args->opentime=mktime(localtime(NULL));
+		args->devname=path_utf;
+		
+		pthread_t threadid;
+		/* TODO: study attributes */
+		if (pthread_create(&threadid, NULL, portsniffer, (void* )args);
+	}
+
 	/* Create a corresponding file descriptor */
 	{
 		jclass cFileDescriptor = (*env)->FindClass(env, "java/io/FileDescriptor");
 		jmethodID iFileDescriptor = (*env)->GetMethodID(env, cFileDescriptor, "<init>", "()V");
 		jfieldID descriptorID = (*env)->GetFieldID(env, cFileDescriptor, "descriptor", "I");
 		mFileDescriptor = (*env)->NewObject(env, cFileDescriptor, iFileDescriptor);
-		(*env)->SetIntField(env, mFileDescriptor, descriptorID, (jint)fd);
+		(*env)->SetIntField(env, mFileDescriptor, descriptorID, (jint)socket[1]);
+		(*env)->ReleaseStringUTFChars(env, path, path_utf); /* TODO: possible race condition with the thread, need a mutex */
 	}
 
 	return mFileDescriptor;
