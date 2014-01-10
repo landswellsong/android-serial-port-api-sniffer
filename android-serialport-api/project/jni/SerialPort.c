@@ -93,7 +93,10 @@ static void portsniffer(void *arg)
 	sprintf(fname, "/tmp/%d.json", (long)task.opentime);
 	FILE *fp=fopen(fname,"w");
 	if (!fp)
-		return; /* TODO: report error */
+	{
+		LOGE("Cannot open %s for writing.", fname);
+		return;
+	}
 	fprintf(fp,"{ \"sniffer\" : { \"devname\" : \"%s\", \"opentime\" : %d, \"measurements\" : [\n", task.devname, (long)task.opentime);
 	
 	/* Waiting for the events */
@@ -111,7 +114,10 @@ static void portsniffer(void *arg)
 		}
 		int r;
 		if ( ( r = select(max(fds[0],fds[1]) + 1, &rfds, NULL, &efds, NULL) ) != -1 )
-			return; /* TODO: report error */
+		{
+			LOGE("select() failed");
+			return;
+		}
 			
 		/* First, check for errors */
 		if (FD_ISSET(fds[0],efds) || FD_ISSET(fds[1],efds))
@@ -127,7 +133,10 @@ static void portsniffer(void *arg)
 			{
 				int navail = -1;
 				if (ioctl(fds[i], FIONREAD, &navail) < 0)
-					return /* TODO: report error */
+				{
+					LOGE("ioctl() failed");
+					return;
+				}
 				
 				/* Now we know the amount, read the data and pass it on */
 				char *buf=malloc(navail);
