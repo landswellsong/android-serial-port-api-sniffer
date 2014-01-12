@@ -18,12 +18,15 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
 #include <fcntl.h>
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
 #include <pthread.h>
 #include <jni.h>
+
+#define max(a,b) ((a)>(b)?(a):(b))
 
 #include "SerialPort.h"
 
@@ -77,30 +80,28 @@ struct snifferarg
 	int realfd;
 	int socket;
 	time_t opentime;
-	const char* devname;
+	char* devname;
 };
 
 /* TODO: error checks */
-static void portsniffer(void *arg)
+static void* portsniffer(void *arg)
 {
 	/* Obtaining a local copy of task spec and freeing the params */
 	struct snifferarg task;
 	memcpy(&task, arg, sizeof(struct snifferarg));
-	char *devname=((struct snifferarg *)arg)->devname;
-	task.devname=malloc(strlen(devname));
-	strcpy(task.devname, devname); /* TODO: this may leak on premature return, use goto */
+	task.devname=((struct snifferarg *)arg)->devname; /* TODO: this may leak on premature return, use goto */
 	free(arg);
 	
 	/* Open the file descriptor, fill the header */
 	char fname[256];
-	sprintf(fname, "/tmp/%d.json", (long)task.opentime);
+	sprintf(fname, "/cache/%ld.json", (long)task.opentime);
 	FILE *fp=fopen(fname,"w");
 	if (!fp)
 	{
 		LOGE("Cannot open %s for writing.", fname);
-		return;
+		goto error_hard;
 	}
-	fprintf(fp,"{ \"sniffer\" : { \"devname\" : \"%s\", \"opentime\" : %d, \"measurements\" : [\n", task.devname, (long)task.opentime);
+	fprintf(fp,"{ \"sniffer\" : { \"devname\" : \"%s\", \"opentime\" : %ld, \"measurements\" : [\n", task.devname, (long)task.opentime);
 	
 	/* Waiting for the events */
 	int fds[2] = { task.realfd, task.socket }; /* TODO: check if closing the socket triggers anything, if not, use poll() */
@@ -116,15 +117,17 @@ static void portsniffer(void *arg)
 			FD_SET(fds[i],&efds);
 		}
 		int r;
-		if ( ( r = select(max(fds[0],fds[1]) + 1, &rfds, NULL, &efds, NULL) ) != -1 )
+		if ( ( r = select(max(fds[0],fds[1]) + 1, &rfds, NULL, &efds, NULL) ) == -1 )
 		{
 			LOGE("select() failed");
-			return;
+			goto error_soft;
 		}
+		LOGD("select yielded %d fds",r);
 			
 		/* First, check for errors */
-		if (FD_ISSET(fds[0],efds) || FD_ISSET(fds[1],efds))
+		if (FD_ISSET(fds[0],&efds) || FD_ISSET(fds[1],&efds))
 		{
+			LOGD("One of the sockets is closing, shutting operations down");
 			close(task.socket); close(task.realfd);
 			break;
 		}
@@ -132,22 +135,29 @@ static void portsniffer(void *arg)
 		/* Great, let's see how much data we have to read */
 		for (i=0;i<2;i++)
 		{
-			if (FD_ISSET(fds[i]),rfds)
+			if (FD_ISSET(fds[i],&rfds))
 			{
+				LOGD("reading from %d #%d",fds[i],i);
 				int navail = -1;
 				if (ioctl(fds[i], FIONREAD, &navail) < 0)
 				{
 					LOGE("ioctl() failed");
-					return;
+					goto error_soft;
 				}
+				LOGD("bytes available %d",navail);
 				
 				/* Now we know the amount, read the data and pass it on */
-				char *buf=malloc(navail);
+				char *buf=malloc(navail+1);
 				read(fds[i], buf, navail);
+				buf[navail]=0;
 				write(fds[!i], buf, navail);
 				
 				/* Log the whole thing TODO: should we log the data "as is" or in hexes? */
-				fprintf(fp,"{ \"direction\" : \"%s\", \"time\" : %d, \"data\" : \"%s\" }\n", dirs[i], mktime(localtime(NULL)), buf);
+				fprintf(fp,"{ \"direction\" : \"%s\", \"time\" : %ld, \"data\" : \"%s\" }\n", dirs[i], time(NULL), buf);
+				
+				/* TODO fsync and fdatasync don't seem to push the buffers, or I'm doing it wrong */
+				/* Temporary remedy against JNI code exiting without the file being closed first */
+				fclose(fp); fp=fopen(fname,"a");
 				
 				free(buf);
 			}
@@ -155,9 +165,13 @@ static void portsniffer(void *arg)
 	}
 	
 	/* Okay, the other of the socket is closed, let's finish */
+error_soft:
 	fprintf(fp,"] } }\n");
 	fclose(fp);
+error_hard:
 	free(task.devname);
+    
+	return NULL;
 }
 
 /*
@@ -233,16 +247,21 @@ JNIEXPORT jobject JNICALL Java_android_1serialport_1api_SerialPort_open
 			LOGE("socketpair() failed");
 			return;
 		}
-		
-		struct snifferarg *args = (struct snifferargs *)malloc(sizeof(struct snifferargs));
+		struct snifferarg *args = (struct snifferarg *)malloc(sizeof(struct snifferarg));
 		args->realfd=fd;
 		args->socket=sockets[0];
-		args->opentime=mktime(localtime(NULL));
-		args->devname=path_utf;
+		args->opentime=time(NULL);
+		args->devname=malloc(strlen(path_utf)); 
+		strcpy(args->devname,path_utf);
+		(*env)->ReleaseStringUTFChars(env, path, path_utf);
 		
 		pthread_t threadid;
 		/* TODO: study attributes */
-		if (pthread_create(&threadid, NULL, portsniffer, (void* )args);
+		if (pthread_create(&threadid, NULL, portsniffer, (void* )args)<0)
+		{
+			LOGE("pthread_create() failed");
+			return;
+		}
 	}
 
 	/* Create a corresponding file descriptor */
@@ -251,8 +270,7 @@ JNIEXPORT jobject JNICALL Java_android_1serialport_1api_SerialPort_open
 		jmethodID iFileDescriptor = (*env)->GetMethodID(env, cFileDescriptor, "<init>", "()V");
 		jfieldID descriptorID = (*env)->GetFieldID(env, cFileDescriptor, "descriptor", "I");
 		mFileDescriptor = (*env)->NewObject(env, cFileDescriptor, iFileDescriptor);
-		(*env)->SetIntField(env, mFileDescriptor, descriptorID, (jint)socket[1]);
-		(*env)->ReleaseStringUTFChars(env, path, path_utf); /* TODO: possible race condition with the thread, need a mutex */
+		(*env)->SetIntField(env, mFileDescriptor, descriptorID, (jint)sockets[1]);
 	}
 
 	return mFileDescriptor;
