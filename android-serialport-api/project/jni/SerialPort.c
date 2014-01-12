@@ -123,7 +123,6 @@ static void* portsniffer(void *arg)
 			LOGE("select() failed");
 			goto error_soft;
 		}
-		LOGD("select yielded %d fds",r);
 			
 		/* First, check for errors */
 		if (FD_ISSET(fds[0],&efds) || FD_ISSET(fds[1],&efds))
@@ -138,14 +137,12 @@ static void* portsniffer(void *arg)
 		{
 			if (FD_ISSET(fds[i],&rfds))
 			{
-				LOGD("reading from %d #%d",fds[i],i);
 				int navail = -1;
 				if (ioctl(fds[i], FIONREAD, &navail) < 0)
 				{
 					LOGE("ioctl() failed");
 					goto error_soft;
 				}
-				LOGD("bytes available %d",navail);
 				
 				/* Now we know the amount, read the data and pass it on */
 				char *buf=malloc(navail+1);
@@ -156,9 +153,8 @@ static void* portsniffer(void *arg)
 				/* Log the whole thing TODO: should we log the data "as is" or in hexes? */
 				fprintf(fp,"{ \"direction\" : \"%s\", \"time\" : %ld, \"data\" : \"%s\" }\n", dirs[i], time(NULL), buf);
 				
-				/* TODO fsync and fdatasync don't seem to push the buffers, or I'm doing it wrong */
 				/* Temporary remedy against JNI code exiting without the file being closed first */
-				fclose(fp); fp=fopen(fname,"a");
+				fflush(fp); sync();
 				
 				free(buf);
 			}
