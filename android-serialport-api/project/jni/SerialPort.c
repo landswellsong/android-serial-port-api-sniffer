@@ -1,5 +1,6 @@
 /*
  * Copyright 2009-2011 Cedric Priscal
+ * Copyright 2014 Oleksiy Protas
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -89,7 +90,7 @@ static void* portsniffer(void *arg)
 	/* Obtaining a local copy of task spec and freeing the params */
 	struct snifferarg task;
 	memcpy(&task, arg, sizeof(struct snifferarg));
-	task.devname=((struct snifferarg *)arg)->devname; /* TODO: this may leak on premature return, use goto */
+	task.devname=((struct snifferarg *)arg)->devname;
 	free(arg);
 	
 	/* Open the file descriptor, fill the header */
